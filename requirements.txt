@@ -1,0 +1,4 @@
+pandas>=2.2.0
+requests>=2.32.0
+streamlit>=1.44.0
+python-dotenv>=1.0.1
