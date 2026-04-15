@@ -15,6 +15,28 @@ class OptibusError(RuntimeError):
     """Raised when the Optibus API returns an unexpected error."""
 
 
+def _is_retryable_payroll_error(exc: Exception) -> bool:
+    """Return True for payroll engine/server errors that are worth isolating by splitting."""
+    message = str(exc)
+    if "HTTP 500" not in message:
+        return False
+    if "/v2/payroll" not in message:
+        return False
+    lowered = message.lower()
+    return (
+        "engine-error" in lowered
+        or "type mismatch" in lowered
+        or "could not find a type converters" in lowered
+        or '\"name\":\"engine-error\"' in lowered
+    )
+
+
+def _summarize_exception(exc: Exception, limit: int = 240) -> str:
+    """Return a shortened single-line error summary for logs."""
+    text = " ".join(str(exc).split())
+    return text[:limit]
+
+
 class OptibusClient:
     """Small HTTP client for the Optibus external API."""
 
@@ -175,7 +197,7 @@ def _fetch_payroll_range_resilient(
     paycodes: Optional[list[str]] = None,
     log=print,
 ) -> list[dict]:
-    """Fetch one date range and recursively split drivers/dates if the API rejects the request size."""
+    """Fetch one date range and recursively split drivers/dates when the API rejects or cannot calculate the slice."""
     params: dict[str, Any] = {
         "startDate": iso_date(start),
         "endDate": iso_date(end),
@@ -192,7 +214,48 @@ def _fetch_payroll_range_resilient(
             raise OptibusError("depot_id is required when driver_ids is empty for /v2/payroll.")
         params["depotId"] = depot_id
 
-    payload = client.get_json("/v2/payroll", params=params, allow_413=True)
+    try:
+        payload = client.get_json("/v2/payroll", params=params, allow_413=True)
+    except OptibusError as exc:
+        if _is_retryable_payroll_error(exc):
+            if driver_ids and len(driver_ids) > 1:
+                mid = len(driver_ids) // 2
+                left = driver_ids[:mid]
+                right = driver_ids[mid:]
+                log(
+                    "  500 payroll engine error. Splitting drivers: "
+                    f"{len(driver_ids)} -> {len(left)} + {len(right)}"
+                )
+                return _fetch_payroll_range_resilient(
+                    client, start, end, left, should_use_cache, depot_id, paycodes, log
+                ) + _fetch_payroll_range_resilient(
+                    client, start, end, right, should_use_cache, depot_id, paycodes, log
+                )
+
+            if start < end:
+                total_days = (end - start).days + 1
+                left_days = max(1, total_days // 2)
+                left_end = start + timedelta(days=left_days - 1)
+                right_start = left_end + timedelta(days=1)
+                log(
+                    "  500 payroll engine error. Splitting dates: "
+                    f"{iso_date(start)}..{iso_date(end)} -> "
+                    f"{iso_date(start)}..{iso_date(left_end)} + {iso_date(right_start)}..{iso_date(end)}"
+                )
+                return _fetch_payroll_range_resilient(
+                    client, start, left_end, driver_ids, should_use_cache, depot_id, paycodes, log
+                ) + _fetch_payroll_range_resilient(
+                    client, right_start, end, driver_ids, should_use_cache, depot_id, paycodes, log
+                )
+
+            log(
+                "  Skipping failing payroll slice after isolating API engine error: "
+                f"date={iso_date(start)}, drivers={','.join(driver_ids) if driver_ids else '(depot mode)'}, "
+                f"details={_summarize_exception(exc)}"
+            )
+            return []
+
+        raise
 
     if isinstance(payload, dict) and payload.get("__HTTP_413__"):
         if driver_ids and len(driver_ids) > 1:

@@ -15,6 +15,7 @@ COL_UNIT = "Time Unit"
 DIFF_COLS = [COL_DRIVER, COL_DATE, COL_CODE, COL_UNIT, "Change", "Pre-changes", "Post-changes"]
 
 _TIME_RE = re.compile(r"^[+-]?\d{1,3}:\d{2}$")
+_NULL_TEXT_VALUES = {"nan", "none", "null", "nat", "<na>"}
 
 
 def mask_api_key(key: str, keep: int = 6) -> str:
@@ -94,16 +95,31 @@ def minutes_to_hhmm(total_minutes: Union[float, int]) -> str:
     return f"{sign}{hours:02d}:{minutes:02d}"
 
 
+def is_blankish(value: Any) -> bool:
+    """Return True for None/NaN/NaT/blank-like text values."""
+    if value is None:
+        return True
+
+    try:
+        if value != value:
+            return True
+    except Exception:
+        pass
+
+    text = str(value).strip()
+    if text == "":
+        return True
+    return text.lower() in _NULL_TEXT_VALUES
+
+
 def safe_str(value: Any) -> str:
-    """Convert None to an empty string, otherwise cast to str."""
-    return "" if value is None else str(value)
+    """Convert blank-like values to an empty string, otherwise cast to str."""
+    return "" if is_blankish(value) else str(value)
 
 
 def excel_sanitize_cell(value: Any) -> str:
     """Prevent Excel from treating values as formulas or coercing negative HH:MM."""
-    if value is None:
-        return ""
-    text = str(value)
+    text = normalize_str(value)
     if not text:
         return ""
     if text[0] in ("=", "+", "@"):
@@ -115,10 +131,11 @@ def excel_sanitize_cell(value: Any) -> str:
 
 def excel_unsanitize_cell(value: Any) -> str:
     """Undo the leading apostrophe added for Excel safety."""
-    if value is None:
+    text = safe_str(value)
+    if not text:
         return ""
-    text = str(value)
-    return text[1:] if text.startswith("'") and len(text) > 1 else text
+    text = text[1:] if text.startswith("'") and len(text) > 1 else text
+    return "" if is_blankish(text) else text
 
 
 def is_zero_amount(amount: Any, unit: Any = "") -> bool:
@@ -149,15 +166,13 @@ def sniff_dialect(path: str, encoding: str) -> csv.Dialect:
 
 
 def normalize_str(value: Any) -> str:
-    """Normalize a value for diffing."""
-    if value is None:
-        return ""
-    return str(value).strip()
+    """Normalize a value for diffing while treating null-like values as blank."""
+    return "" if is_blankish(value) else str(value).strip()
 
 
 def try_float(value: str) -> Optional[float]:
     """Convert a numeric-like string into a float when possible."""
-    if value is None:
+    if is_blankish(value):
         return None
     text = str(value).strip()
     if not text:
