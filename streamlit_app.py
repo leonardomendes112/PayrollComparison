@@ -216,7 +216,11 @@ if st.session_state.post_result is not None:
         )
 
     st.subheader("Enriched differences preview")
-    preview_df = pd.read_csv(post_result.enriched_differences_path, encoding="utf-8-sig").head(100)
+    preview_df = pd.read_csv(
+        post_result.enriched_differences_path,
+        encoding="utf-8-sig",
+        keep_default_na=False,
+    ).fillna("").head(100)
     st.dataframe(preview_df, use_container_width=True)
 
 st.divider()
