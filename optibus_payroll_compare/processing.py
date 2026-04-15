@@ -24,6 +24,7 @@ from .utils import (
     excel_date_col,
     excel_sanitize_cell,
     excel_unsanitize_cell,
+    is_blankish,
     is_zero_amount,
     minutes_to_hhmm,
     normalize_str,
@@ -32,9 +33,36 @@ from .utils import (
 )
 
 
+
+def to_numeric_if_possible(series: pd.Series) -> pd.Series:
+    """Convert a series to numeric only when all non-blank values are numeric.
+
+    This preserves compatibility with newer pandas versions where
+    errors="ignore" is no longer supported in pd.to_numeric.
+    """
+    as_text = series.astype("string")
+    non_blank_mask = as_text.fillna("").str.strip().ne("")
+    converted = pd.to_numeric(as_text.where(non_blank_mask, pd.NA), errors="coerce")
+
+    if converted[non_blank_mask].notna().all():
+        return converted.astype("Int64")
+
+    return series
+
+
 def format_amount_and_unit(value: Any, unit: str) -> tuple[str, str]:
     """Format Optibus result values into the CSV shape expected by downstream users."""
     normalized_unit = (unit or "").strip()
+
+    if is_blankish(value):
+        if normalized_unit.lower() in {"minutes", "minute", "hours", "hour"}:
+            return ("", "Hours")
+        if normalized_unit.lower() in {"days", "day"}:
+            return ("", "Days")
+        if normalized_unit.lower() == "boolean":
+            return ("", "Boolean")
+        return ("", normalized_unit if normalized_unit else "Number")
+
     if isinstance(value, bool) or normalized_unit.lower() == "boolean":
         return ("1" if bool(value) else "0", "Boolean")
 
@@ -45,7 +73,7 @@ def format_amount_and_unit(value: Any, unit: str) -> tuple[str, str]:
         return (stripped, "Number")
 
     if normalized_unit.lower() in {"minutes", "minute"}:
-        return (minutes_to_hhmm(0 if value is None else value), "Hours")
+        return (minutes_to_hhmm(value), "Hours")
 
     if normalized_unit.lower() in {"hours", "hour"}:
         try:
@@ -93,9 +121,9 @@ def to_payroll_rows_from_payroll_api(records: list[dict]) -> list[dict]:
 
 def save_payroll_csv(rows: list[dict], out_path: Path) -> int:
     """Save payroll rows and return the number of records written."""
-    dataframe = pd.DataFrame(rows, columns=[COL_DRIVER, COL_DATE, COL_CODE, COL_AMOUNT, COL_UNIT])
+    dataframe = pd.DataFrame(rows, columns=[COL_DRIVER, COL_DATE, COL_CODE, COL_AMOUNT, COL_UNIT]).fillna("")
     dataframe[COL_AMOUNT] = dataframe[COL_AMOUNT].apply(excel_sanitize_cell)
-    dataframe[COL_DRIVER] = pd.to_numeric(dataframe[COL_DRIVER], errors="ignore")
+    dataframe[COL_DRIVER] = to_numeric_if_possible(dataframe[COL_DRIVER])
     dataframe = dataframe.sort_values([COL_DRIVER, COL_DATE, COL_CODE, COL_UNIT], kind="stable")
     dataframe.to_csv(out_path, index=False, encoding="utf-8-sig")
     return len(dataframe)
@@ -147,8 +175,8 @@ def save_absences_csv(absences: list[dict], by_external_id: dict[str, DriverInfo
             "End time",
             "Note",
         ],
-    )
-    dataframe["Driver Id"] = pd.to_numeric(dataframe["Driver Id"], errors="ignore")
+    ).fillna("")
+    dataframe["Driver Id"] = to_numeric_if_possible(dataframe["Driver Id"])
     dataframe = dataframe.sort_values(["Driver Id", "Start date", "Absence code"], kind="stable")
     dataframe.to_csv(out_path, index=False, encoding="utf-8-sig")
     return len(dataframe)
@@ -195,8 +223,8 @@ def _save_allocation_matrix(
                 row[excel_date_col(current_date)] = ""
         rows_out.append(row)
 
-    dataframe = pd.DataFrame(rows_out, columns=columns)
-    dataframe["Driver ID"] = pd.to_numeric(dataframe["Driver ID"], errors="ignore")
+    dataframe = pd.DataFrame(rows_out, columns=columns).fillna("")
+    dataframe["Driver ID"] = to_numeric_if_possible(dataframe["Driver ID"])
     dataframe.to_csv(out_path, index=False, encoding="utf-8-sig")
     return len(dataframe)
 
@@ -384,16 +412,16 @@ def compute_diffs(
                     }
                 )
 
-    dataframe = pd.DataFrame(differences, columns=DIFF_COLS)
-    dataframe[COL_DRIVER] = pd.to_numeric(dataframe[COL_DRIVER], errors="ignore")
+    dataframe = pd.DataFrame(differences, columns=DIFF_COLS).fillna("")
+    dataframe[COL_DRIVER] = to_numeric_if_possible(dataframe[COL_DRIVER])
     dataframe = dataframe.sort_values([COL_DRIVER, COL_DATE, COL_CODE, COL_UNIT, "Change"], kind="stable")
     if "Pre-changes" in dataframe.columns:
         dataframe["Pre-changes"] = dataframe["Pre-changes"].apply(
-            lambda value: excel_sanitize_cell(excel_unsanitize_cell(value))
+            lambda value: "" if is_zero_amount(value, "") else excel_sanitize_cell(excel_unsanitize_cell(value))
         )
     if "Post-changes" in dataframe.columns:
         dataframe["Post-changes"] = dataframe["Post-changes"].apply(
-            lambda value: excel_sanitize_cell(excel_unsanitize_cell(value))
+            lambda value: "" if is_zero_amount(value, "") else excel_sanitize_cell(excel_unsanitize_cell(value))
         )
     dataframe.to_csv(out_csv, index=False, encoding="utf-8-sig")
     return len(dataframe)
@@ -407,12 +435,12 @@ def enrich_differences(
     out_path: Path,
 ) -> int:
     """Enrich differences with absences, actual allocation, and planned allocation."""
-    amount = pd.read_csv(amount_path, encoding="utf-8-sig")
+    amount = pd.read_csv(amount_path, encoding="utf-8-sig", keep_default_na=False).fillna("")
     for column in [COL_DRIVER, COL_DATE]:
         if column not in amount.columns:
             raise ValueError(f"differences CSV missing required column: {column}")
 
-    absences_df = pd.read_csv(absences_path, encoding="utf-8-sig")
+    absences_df = pd.read_csv(absences_path, encoding="utf-8-sig", keep_default_na=False).fillna("")
     required_absence_columns = {"Driver Id", "Start date", "End date", "Absence code"}
     if not required_absence_columns.issubset(absences_df.columns):
         raise ValueError(
@@ -420,7 +448,7 @@ def enrich_differences(
         )
 
     def parse_excel_date(value: Any) -> pd.Timestamp | None:
-        if pd.isna(value):
+        if is_blankish(value) or pd.isna(value):
             return None
         text = str(value).strip().replace('="', "").replace('"', "")
         try:
@@ -433,20 +461,20 @@ def enrich_differences(
 
     absences_df["_start"] = absences_df["Start date"].apply(parse_excel_date)
     absences_df["_end"] = absences_df["End date"].apply(parse_excel_date)
-    absences_df["_driver"] = absences_df["Driver Id"].astype(str).str.strip()
+    absences_df["_driver"] = absences_df["Driver Id"].apply(normalize_str)
 
     absences_map: dict[tuple[str, pd.Timestamp], list[str]] = defaultdict(list)
     for _, row in absences_df.iterrows():
-        driver_id = row["_driver"]
+        driver_id = normalize_str(row["_driver"])
         start_date = row["_start"]
         end_date = row["_end"]
-        absence_code = str(row["Absence code"]).strip()
-        if not driver_id or driver_id in {"nan", "None"} or start_date is None or end_date is None or not absence_code:
+        absence_code = normalize_str(row["Absence code"])
+        if not driver_id or start_date is None or end_date is None or not absence_code:
             continue
         current = start_date.normalize()
         end_normalized = end_date.normalize()
         while current <= end_normalized:
-            absences_map[(str(driver_id), current)].append(absence_code)
+            absences_map[(driver_id, current)].append(absence_code)
             current += pd.Timedelta(days=1)
 
     def absences_for(driver_id: str, timestamp: pd.Timestamp) -> str:
@@ -461,8 +489,12 @@ def enrich_differences(
                 seen.add(code)
         return ", ".join(ordered)
 
-    actual_allocation = pd.read_csv(allocation_actual_path, encoding="utf-8-sig")
-    planned_allocation = pd.read_csv(allocation_planned_path, encoding="utf-8-sig")
+    actual_allocation = pd.read_csv(
+        allocation_actual_path, encoding="utf-8-sig", keep_default_na=False
+    ).fillna("")
+    planned_allocation = pd.read_csv(
+        allocation_planned_path, encoding="utf-8-sig", keep_default_na=False
+    ).fillna("")
     for dataframe, name in [(actual_allocation, "allocation actual"), (planned_allocation, "allocation planned")]:
         if "Driver ID" not in dataframe.columns:
             raise ValueError(f"{name} CSV missing required column: Driver ID")
@@ -471,23 +503,20 @@ def enrich_differences(
         allocation_lists: dict[tuple[str, pd.Timestamp], list[str]] = defaultdict(list)
         date_columns = [column for column in dataframe.columns if re.match(r"^\d{4}-\d{2}-\d{2}$", str(column))]
         frame = dataframe.copy()
-        frame["Driver ID"] = frame["Driver ID"].astype(str).str.strip()
+        frame["Driver ID"] = frame["Driver ID"].apply(normalize_str)
 
         for _, row in frame.iterrows():
-            driver_id = row["Driver ID"]
-            if not driver_id or driver_id in {"nan", "None"}:
+            driver_id = normalize_str(row["Driver ID"])
+            if not driver_id:
                 continue
             for column in date_columns:
-                value = row.get(column)
-                if pd.isna(value):
-                    continue
-                text = str(value).strip()
+                text = normalize_str(row.get(column))
                 if not text:
                     continue
                 timestamp = parse_excel_date(column)
                 if timestamp is None:
                     continue
-                allocation_lists[(str(driver_id), timestamp.normalize())].append(text)
+                allocation_lists[(driver_id, timestamp.normalize())].append(text)
 
         out: dict[tuple[str, pd.Timestamp], str] = {}
         for key, values in allocation_lists.items():
@@ -509,33 +538,37 @@ def enrich_differences(
             return actual_map.get(key, "")
         return planned_map.get(key, "")
 
-    amount[COL_DRIVER] = amount[COL_DRIVER].astype(str).str.strip()
+    amount[COL_DRIVER] = amount[COL_DRIVER].apply(normalize_str)
     amount[COL_DATE] = pd.to_datetime(amount[COL_DATE], errors="coerce")
     amount["Absences"] = [
-        absences_for(str(driver_id), timestamp)
-        if (str(driver_id) not in {"", "nan", "None"} and not pd.isna(timestamp))
+        absences_for(normalize_str(driver_id), timestamp)
+        if (normalize_str(driver_id) and not pd.isna(timestamp))
         else ""
         for driver_id, timestamp in zip(amount[COL_DRIVER], amount[COL_DATE])
     ]
     amount["Actual Allocation"] = [
-        allocation_for(str(driver_id), timestamp, "actual")
-        if (str(driver_id) not in {"", "nan", "None"} and not pd.isna(timestamp))
+        allocation_for(normalize_str(driver_id), timestamp, "actual")
+        if (normalize_str(driver_id) and not pd.isna(timestamp))
         else ""
         for driver_id, timestamp in zip(amount[COL_DRIVER], amount[COL_DATE])
     ]
     amount["Planned Allocation"] = [
-        allocation_for(str(driver_id), timestamp, "planned")
-        if (str(driver_id) not in {"", "nan", "None"} and not pd.isna(timestamp))
+        allocation_for(normalize_str(driver_id), timestamp, "planned")
+        if (normalize_str(driver_id) and not pd.isna(timestamp))
         else ""
         for driver_id, timestamp in zip(amount[COL_DRIVER], amount[COL_DATE])
     ]
 
-    for column in ["Pre-changes", "Post-changes"]:
+    for column in ["Pre-changes", "Post-changes", "Absences", "Actual Allocation", "Planned Allocation"]:
         if column in amount.columns:
-            amount[column] = amount[column].apply(
-                lambda value: "" if is_zero_amount(value, "") else excel_sanitize_cell(excel_unsanitize_cell(value))
-            )
+            if column in {"Pre-changes", "Post-changes"}:
+                amount[column] = amount[column].apply(
+                    lambda value: "" if is_zero_amount(value, "") else excel_sanitize_cell(excel_unsanitize_cell(value))
+                )
+            else:
+                amount[column] = amount[column].apply(normalize_str)
 
+    amount = amount.fillna("")
     amount.to_csv(out_path, index=False, encoding="utf-8-sig")
     return len(amount)
 
