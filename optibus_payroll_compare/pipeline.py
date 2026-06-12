@@ -17,6 +17,7 @@ from .api import (
 )
 from .models import PostRunResult, PreRunResult, RunParameters, WorkEntitiesExportResult
 from .processing import (
+    create_duty_branch_mismatch_report,
     compute_diffs,
     create_zip_archive,
     enrich_differences,
@@ -248,18 +249,36 @@ def run_post_compare(
         out_path=enriched_differences_path,
     )
 
+    duty_branch_report_path = None
+    duty_branch_report_rows = 0
+    if params.check_duty_branch_mismatches:
+        log("Checking planned versus actual duties...")
+        duty_branch_report_path = (
+            pre_result.output_dir
+            / f"duty_branch_mismatches_{params.start_date}_to_{params.end_date}_{pre_result.run_id}.csv"
+        )
+        duty_branch_report_rows = create_duty_branch_mismatch_report(
+            driver_day_labels_path=pre_result.pre_driver_day_labels_path,
+            allocation_actual_path=pre_result.pre_allocation_actual_path,
+            allocation_planned_path=pre_result.pre_allocation_planned_path,
+            out_path=duty_branch_report_path,
+        )
+
     zip_path = pre_result.output_dir / f"optibus_payroll_compare_{pre_result.run_id}.zip"
+    file_paths = [
+        pre_result.pre_payroll_path,
+        pre_result.pre_absences_path,
+        pre_result.pre_driver_day_labels_path,
+        pre_result.pre_allocation_actual_path,
+        pre_result.pre_allocation_planned_path,
+        post_payroll_path,
+        differences_path,
+        enriched_differences_path,
+    ]
+    if duty_branch_report_path is not None:
+        file_paths.append(duty_branch_report_path)
     create_zip_archive(
-        file_paths=[
-            pre_result.pre_payroll_path,
-            pre_result.pre_absences_path,
-            pre_result.pre_driver_day_labels_path,
-            pre_result.pre_allocation_actual_path,
-            pre_result.pre_allocation_planned_path,
-            post_payroll_path,
-            differences_path,
-            enriched_differences_path,
-        ],
+        file_paths=file_paths,
         zip_path=zip_path,
     )
 
@@ -272,6 +291,8 @@ def run_post_compare(
         differences_rows=differences_rows,
         enriched_rows=enriched_rows,
         max_parallel_requests=max_parallel_requests,
+        duty_branch_report_path=duty_branch_report_path,
+        duty_branch_report_rows=duty_branch_report_rows,
     )
 
 

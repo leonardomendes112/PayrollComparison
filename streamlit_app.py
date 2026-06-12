@@ -45,6 +45,7 @@ def build_params() -> RunParameters:
         paycodes_csv=st.session_state.paycodes_csv.strip(),
         tolerance=float(st.session_state.tolerance) if st.session_state.tolerance else None,
         should_use_cache=st.session_state.should_use_cache,
+        check_duty_branch_mismatches=st.session_state.check_duty_branch_mismatches,
     )
 
 
@@ -129,6 +130,15 @@ with st.sidebar:
         value=False,
         help="POST always forces recalculation to capture the latest Work Entity changes.",
     )
+    st.checkbox(
+        "Check planned vs actual duties",
+        key="check_duty_branch_mismatches",
+        value=False,
+        help=(
+            "Creates an extra CSV that checks each duty/date across planned and actual allocations and flags "
+            "driver or driver-day-label mismatches."
+        ),
+    )
 
     if st.button("Clear session state", use_container_width=True):
         st.session_state.pre_result = None
@@ -212,6 +222,8 @@ if st.session_state.post_result is not None:
     col2.metric("Difference rows", post_result.differences_rows)
     col3.metric("Enriched rows", post_result.enriched_rows)
     st.caption(f"POST payroll fetch used parallel_calls={post_result.max_parallel_requests}")
+    if post_result.duty_branch_report_path is not None:
+        st.metric("Duty branch mismatches", post_result.duty_branch_report_rows)
 
     for file_path in [
         post_result.post_payroll_path,
@@ -225,6 +237,15 @@ if st.session_state.post_result is not None:
                 data=handle.read(),
                 file_name=file_path.name,
                 mime=mime,
+            )
+
+    if post_result.duty_branch_report_path is not None:
+        with open(post_result.duty_branch_report_path, "rb") as handle:
+            st.download_button(
+                label=f"Download {post_result.duty_branch_report_path.name}",
+                data=handle.read(),
+                file_name=post_result.duty_branch_report_path.name,
+                mime="text/csv",
             )
 
     with open(post_result.zip_path, "rb") as handle:

@@ -32,6 +32,7 @@ class RunParameters:
     paycodes_csv: str = ""
     tolerance: Optional[float] = None
     should_use_cache: bool = False
+    check_duty_branch_mismatches: bool = False
 
     @property
     def paycodes(self) -> list[str]:
@@ -84,14 +85,19 @@ class PostRunResult:
     differences_rows: int
     enriched_rows: int
     max_parallel_requests: int
+    duty_branch_report_path: Optional[Path] = None
+    duty_branch_report_rows: int = 0
 
     def files(self, pre_result: PreRunResult) -> list[Path]:
-        return pre_result.files() + [
+        files = pre_result.files() + [
             self.post_payroll_path,
             self.differences_path,
             self.enriched_differences_path,
             self.zip_path,
         ]
+        if self.duty_branch_report_path is not None:
+            files.append(self.duty_branch_report_path)
+        return files
 
 
 @dataclass(frozen=True)

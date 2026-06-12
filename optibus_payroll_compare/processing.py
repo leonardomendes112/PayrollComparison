@@ -412,6 +412,133 @@ def save_allocation_csvs(
     return actual_rows, planned_rows
 
 
+def create_duty_branch_mismatch_report(
+    driver_day_labels_path: Path,
+    allocation_actual_path: Path,
+    allocation_planned_path: Path,
+    out_path: Path,
+) -> int:
+    """Write a duty-level planned-versus-actual mismatch report with driver-day labels."""
+
+    def parse_excel_date(value: Any) -> pd.Timestamp | None:
+        if is_blankish(value) or pd.isna(value):
+            return None
+        text = str(value).strip().replace('="', "").replace('"', "")
+        try:
+            return pd.to_datetime(text, format="%Y-%m-%d")
+        except Exception:
+            try:
+                return pd.to_datetime(text, dayfirst=False)
+            except Exception:
+                return None
+
+    def load_label_map(path: Path) -> dict[tuple[str, str], str]:
+        dataframe = pd.read_csv(path, encoding="utf-8-sig", keep_default_na=False).fillna("")
+        label_map: dict[tuple[str, str], str] = {}
+        if dataframe.empty:
+            return label_map
+        required_columns = {"Driver ID", "Date", "Driver Day Label"}
+        if not required_columns.issubset(dataframe.columns):
+            raise ValueError("driver day labels CSV missing required columns: Driver ID, Date, Driver Day Label")
+        dataframe["Driver ID"] = dataframe["Driver ID"].apply(normalize_str)
+        dataframe["Date"] = pd.to_datetime(dataframe["Date"], errors="coerce")
+        for _, row in dataframe.iterrows():
+            driver_id = normalize_str(row.get("Driver ID"))
+            date_value = row.get("Date")
+            label_text = normalize_str(row.get("Driver Day Label"))
+            if not driver_id or pd.isna(date_value) or not label_text:
+                continue
+            label_map[(driver_id, date_value.normalize().date().isoformat())] = label_text
+        return label_map
+
+    def load_duty_map(path: Path) -> dict[tuple[str, str], list[str]]:
+        dataframe = pd.read_csv(path, encoding="utf-8-sig", keep_default_na=False).fillna("")
+        if "Driver ID" not in dataframe.columns:
+            raise ValueError(f"allocation CSV missing required column: Driver ID ({path.name})")
+        dataframe["Driver ID"] = dataframe["Driver ID"].apply(normalize_str)
+        date_columns = [column for column in dataframe.columns if re.match(r"^\d{4}-\d{2}-\d{2}$", str(column))]
+
+        duty_map: dict[tuple[str, str], list[str]] = defaultdict(list)
+        for _, row in dataframe.iterrows():
+            driver_id = normalize_str(row.get("Driver ID"))
+            if not driver_id:
+                continue
+            for column in date_columns:
+                timestamp = parse_excel_date(column)
+                if timestamp is None:
+                    continue
+                date_text = timestamp.normalize().date().isoformat()
+                cell_text = normalize_str(row.get(column))
+                if not cell_text:
+                    continue
+                for duty_id in [item.strip() for item in cell_text.split(",") if item.strip()]:
+                    duty_map[(date_text, duty_id)].append(driver_id)
+        return duty_map
+
+    def unique_join(values: list[str]) -> str:
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for value in values:
+            text = normalize_str(value)
+            if text and text not in seen:
+                seen.add(text)
+                ordered.append(text)
+        return ", ".join(ordered)
+
+    label_map = load_label_map(driver_day_labels_path)
+    planned_duties = load_duty_map(allocation_planned_path)
+    actual_duties = load_duty_map(allocation_actual_path)
+
+    report_rows: list[dict[str, str]] = []
+    for date_text, duty_id in sorted(set(planned_duties.keys()) | set(actual_duties.keys())):
+        planned_drivers = sorted(set(planned_duties.get((date_text, duty_id), [])))
+        actual_drivers = sorted(set(actual_duties.get((date_text, duty_id), [])))
+        planned_labels = unique_join([label_map.get((driver_id, date_text), "") for driver_id in planned_drivers])
+        actual_labels = unique_join([label_map.get((driver_id, date_text), "") for driver_id in actual_drivers])
+
+        if not planned_drivers:
+            issue = "missing_in_planned"
+        elif not actual_drivers:
+            issue = "missing_in_actual"
+        elif planned_drivers != actual_drivers and planned_labels != actual_labels:
+            issue = "driver_and_label_mismatch"
+        elif planned_drivers != actual_drivers:
+            issue = "driver_mismatch"
+        elif planned_labels != actual_labels:
+            issue = "label_mismatch"
+        else:
+            continue
+
+        report_rows.append(
+            {
+                "Date": date_text,
+                "Duty ID": duty_id,
+                "Issue": issue,
+                "Planned Driver IDs": ", ".join(planned_drivers),
+                "Planned Driver Day Labels": planned_labels,
+                "Actual Driver IDs": ", ".join(actual_drivers),
+                "Actual Driver Day Labels": actual_labels,
+            }
+        )
+
+    dataframe = pd.DataFrame(
+        report_rows,
+        columns=[
+            "Date",
+            "Duty ID",
+            "Issue",
+            "Planned Driver IDs",
+            "Planned Driver Day Labels",
+            "Actual Driver IDs",
+            "Actual Driver Day Labels",
+        ],
+    ).fillna("")
+    if not dataframe.empty:
+        dataframe = dataframe.sort_values(["Date", "Duty ID", "Issue"], kind="stable")
+    dataframe.to_csv(out_path, index=False, encoding="utf-8-sig")
+    return len(dataframe)
+
+
 Key = tuple[str, str, str, str]
 
 
