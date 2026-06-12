@@ -413,12 +413,13 @@ def save_allocation_csvs(
 
 
 def create_duty_branch_mismatch_report(
+    payroll_path: Path,
     driver_day_labels_path: Path,
     allocation_actual_path: Path,
     allocation_planned_path: Path,
     out_path: Path,
 ) -> int:
-    """Write a duty-level planned-versus-actual mismatch report with driver-day labels."""
+    """Write a duty-level planned-versus-actual payroll comparison report."""
 
     def parse_excel_date(value: Any) -> pd.Timestamp | None:
         if is_blankish(value) or pd.isna(value):
@@ -450,6 +451,31 @@ def create_duty_branch_mismatch_report(
                 continue
             label_map[(driver_id, date_value.normalize().date().isoformat())] = label_text
         return label_map
+
+    def load_payroll_map(path: Path) -> dict[tuple[str, str], list[str]]:
+        dataframe = pd.read_csv(path, encoding="utf-8-sig", keep_default_na=False).fillna("")
+        required_columns = {COL_DRIVER, COL_DATE, COL_CODE, COL_AMOUNT, COL_UNIT}
+        if not required_columns.issubset(dataframe.columns):
+            raise ValueError(
+                "payroll CSV missing required columns: Driver ID, Date, Code, Amount, Unit"
+            )
+
+        payroll_map: dict[tuple[str, str], list[str]] = defaultdict(list)
+        for _, row in dataframe.iterrows():
+            driver_id = normalize_str(row.get(COL_DRIVER))
+            date_text = normalize_str(row.get(COL_DATE))
+            code = normalize_str(row.get(COL_CODE))
+            amount = normalize_str(excel_unsanitize_cell(row.get(COL_AMOUNT)))
+            unit = normalize_str(row.get(COL_UNIT))
+            if not driver_id or not date_text or not code:
+                continue
+            parts = [code]
+            if amount:
+                parts.append(amount)
+            if unit:
+                parts.append(unit)
+            payroll_map[(driver_id, date_text)].append(" | ".join(parts))
+        return payroll_map
 
     def load_duty_map(path: Path) -> dict[tuple[str, str], list[str]]:
         dataframe = pd.read_csv(path, encoding="utf-8-sig", keep_default_na=False).fillna("")
@@ -485,7 +511,21 @@ def create_duty_branch_mismatch_report(
                 ordered.append(text)
         return ", ".join(ordered)
 
+    def payroll_summary(driver_ids: list[str], date_text: str) -> str:
+        entries: list[str] = []
+        for driver_id in driver_ids:
+            entries.extend(payroll_map.get((driver_id, date_text), []))
+        if not entries:
+            return ""
+        counts = Counter(normalize_str(entry) for entry in entries if normalize_str(entry))
+        summarized = []
+        for entry in sorted(counts):
+            count = counts[entry]
+            summarized.append(f"{entry} x{count}" if count > 1 else entry)
+        return "; ".join(summarized)
+
     label_map = load_label_map(driver_day_labels_path)
+    payroll_map = load_payroll_map(payroll_path)
     planned_duties = load_duty_map(allocation_planned_path)
     actual_duties = load_duty_map(allocation_actual_path)
 
@@ -495,15 +535,17 @@ def create_duty_branch_mismatch_report(
         actual_drivers = sorted(set(actual_duties.get((date_text, duty_id), [])))
         planned_labels = unique_join([label_map.get((driver_id, date_text), "") for driver_id in planned_drivers])
         actual_labels = unique_join([label_map.get((driver_id, date_text), "") for driver_id in actual_drivers])
+        planned_payroll = payroll_summary(planned_drivers, date_text)
+        actual_payroll = payroll_summary(actual_drivers, date_text)
 
         if not planned_drivers:
             issue = "missing_in_planned"
         elif not actual_drivers:
             issue = "missing_in_actual"
-        elif planned_drivers != actual_drivers and planned_labels != actual_labels:
-            issue = "driver_and_label_mismatch"
-        elif planned_drivers != actual_drivers:
-            issue = "driver_mismatch"
+        elif planned_payroll != actual_payroll and planned_labels != actual_labels:
+            issue = "payroll_and_label_mismatch"
+        elif planned_payroll != actual_payroll:
+            issue = "payroll_result_mismatch"
         elif planned_labels != actual_labels:
             issue = "label_mismatch"
         else:
@@ -516,8 +558,10 @@ def create_duty_branch_mismatch_report(
                 "Issue": issue,
                 "Planned Driver IDs": ", ".join(planned_drivers),
                 "Planned Driver Day Labels": planned_labels,
+                "Planned Payroll Results": planned_payroll,
                 "Actual Driver IDs": ", ".join(actual_drivers),
                 "Actual Driver Day Labels": actual_labels,
+                "Actual Payroll Results": actual_payroll,
             }
         )
 
@@ -529,8 +573,10 @@ def create_duty_branch_mismatch_report(
             "Issue",
             "Planned Driver IDs",
             "Planned Driver Day Labels",
+            "Planned Payroll Results",
             "Actual Driver IDs",
             "Actual Driver Day Labels",
+            "Actual Payroll Results",
         ],
     ).fillna("")
     if not dataframe.empty:

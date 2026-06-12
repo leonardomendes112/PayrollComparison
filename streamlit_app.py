@@ -131,12 +131,12 @@ with st.sidebar:
         help="POST always forces recalculation to capture the latest Work Entity changes.",
     )
     st.checkbox(
-        "Check planned vs actual duties",
+        "Check planned vs actual duty payroll",
         key="check_duty_branch_mismatches",
         value=False,
         help=(
-            "Creates an extra CSV that checks each duty/date across planned and actual allocations and flags "
-            "driver or driver-day-label mismatches."
+            "Creates an extra CSV that compares POST payroll results for each duty/date across planned and actual "
+            "allocations, with driver-day labels included as context."
         ),
     )
 
@@ -223,7 +223,7 @@ if st.session_state.post_result is not None:
     col3.metric("Enriched rows", post_result.enriched_rows)
     st.caption(f"POST payroll fetch used parallel_calls={post_result.max_parallel_requests}")
     if post_result.duty_branch_report_path is not None:
-        st.metric("Duty branch mismatches", post_result.duty_branch_report_rows)
+        st.metric("Duty payroll mismatches", post_result.duty_branch_report_rows)
 
     for file_path in [
         post_result.post_payroll_path,

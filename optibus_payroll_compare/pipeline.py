@@ -201,7 +201,7 @@ def run_post_compare(
 
     log("POST: Fetching payroll...")
     drivers_payload = fetch_all_drivers(client, on_date=params.start_date)
-    _, by_external_id = build_driver_maps(drivers_payload)
+    by_uuid, by_external_id = build_driver_maps(drivers_payload)
     driver_ids = list(by_external_id.keys())
     total_days = (end - start).days + 1
     _, _, max_parallel_requests = _resolve_runtime_settings(len(driver_ids), total_days, params)
@@ -252,15 +252,39 @@ def run_post_compare(
     duty_branch_report_path = None
     duty_branch_report_rows = 0
     if params.check_duty_branch_mismatches:
-        log("Checking planned versus actual duties...")
+        log("POST: Fetching driver day labels for duty payroll comparison...")
+        post_driver_day_labels_path = pre_result.output_dir / f"{post_tag}_driver_day_labels.csv"
+        post_driver_day_labels_records = fetch_driver_day_labels(client, start=start, end=end)
+        save_driver_day_labels_csv(
+            post_driver_day_labels_records,
+            by_uuid=by_uuid,
+            out_path=post_driver_day_labels_path,
+        )
+
+        log("POST: Fetching actual and planned allocations for duty payroll comparison...")
+        post_allocation_actual_path = pre_result.output_dir / f"{post_tag}_driver_allocation_actual.csv"
+        post_allocation_planned_path = pre_result.output_dir / f"{post_tag}_driver_allocation_planned.csv"
+        save_allocation_csvs(
+            client=client,
+            by_uuid=by_uuid,
+            driver_external_ids=driver_ids,
+            start=start,
+            end=end,
+            batch_days=pre_result.batch_days,
+            out_actual_path=post_allocation_actual_path,
+            out_planned_path=post_allocation_planned_path,
+        )
+
+        log("Checking planned versus actual duty payroll results...")
         duty_branch_report_path = (
             pre_result.output_dir
             / f"duty_branch_mismatches_{params.start_date}_to_{params.end_date}_{pre_result.run_id}.csv"
         )
         duty_branch_report_rows = create_duty_branch_mismatch_report(
-            driver_day_labels_path=pre_result.pre_driver_day_labels_path,
-            allocation_actual_path=pre_result.pre_allocation_actual_path,
-            allocation_planned_path=pre_result.pre_allocation_planned_path,
+            payroll_path=post_payroll_path,
+            driver_day_labels_path=post_driver_day_labels_path,
+            allocation_actual_path=post_allocation_actual_path,
+            allocation_planned_path=post_allocation_planned_path,
             out_path=duty_branch_report_path,
         )
 
