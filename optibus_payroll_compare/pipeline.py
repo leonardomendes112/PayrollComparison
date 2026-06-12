@@ -5,7 +5,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from .api import OptibusClient, build_driver_maps, fetch_absences, fetch_all_drivers, fetch_payroll_chunked, fetch_regions
+from .api import (
+    OptibusClient,
+    build_driver_maps,
+    fetch_absences,
+    fetch_all_drivers,
+    fetch_driver_day_labels,
+    fetch_payroll_chunked,
+    fetch_regions,
+)
 from .models import PostRunResult, PreRunResult, RunParameters
 from .processing import (
     compute_diffs,
@@ -13,6 +21,7 @@ from .processing import (
     enrich_differences,
     save_absences_csv,
     save_allocation_csvs,
+    save_driver_day_labels_csv,
     save_payroll_csv,
     to_payroll_rows_from_payroll_api,
 )
@@ -126,6 +135,15 @@ def run_pre_fetch(params: RunParameters, output_dir: Path, log: LogFn = print) -
     pre_absences_path = output_dir / f"{pre_tag}_driver_absences.csv"
     absences_rows = save_absences_csv(absences_records, by_external_id=by_external_id, out_path=pre_absences_path)
 
+    log("PRE: Fetching driver day labels...")
+    driver_day_labels_records = fetch_driver_day_labels(client, start=start, end=end)
+    pre_driver_day_labels_path = output_dir / f"{pre_tag}_driver_day_labels.csv"
+    driver_day_label_rows = save_driver_day_labels_csv(
+        driver_day_labels_records,
+        by_uuid=by_uuid,
+        out_path=pre_driver_day_labels_path,
+    )
+
     log("PRE: Fetching actual and planned allocations...")
     pre_allocation_actual_path = output_dir / f"{pre_tag}_driver_allocation_actual.csv"
     pre_allocation_planned_path = output_dir / f"{pre_tag}_driver_allocation_planned.csv"
@@ -153,10 +171,12 @@ def run_pre_fetch(params: RunParameters, output_dir: Path, log: LogFn = print) -
         pre_tag=pre_tag,
         pre_payroll_path=pre_payroll_path,
         pre_absences_path=pre_absences_path,
+        pre_driver_day_labels_path=pre_driver_day_labels_path,
         pre_allocation_actual_path=pre_allocation_actual_path,
         pre_allocation_planned_path=pre_allocation_planned_path,
         payroll_rows=payroll_rows,
         absences_rows=absences_rows,
+        driver_day_label_rows=driver_day_label_rows,
     )
 
 
@@ -219,6 +239,7 @@ def run_post_compare(
     enriched_rows = enrich_differences(
         amount_path=differences_path,
         absences_path=pre_result.pre_absences_path,
+        driver_day_labels_path=pre_result.pre_driver_day_labels_path,
         allocation_actual_path=pre_result.pre_allocation_actual_path,
         allocation_planned_path=pre_result.pre_allocation_planned_path,
         out_path=enriched_differences_path,
@@ -229,6 +250,7 @@ def run_post_compare(
         file_paths=[
             pre_result.pre_payroll_path,
             pre_result.pre_absences_path,
+            pre_result.pre_driver_day_labels_path,
             pre_result.pre_allocation_actual_path,
             pre_result.pre_allocation_planned_path,
             post_payroll_path,
