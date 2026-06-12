@@ -28,6 +28,7 @@ class RunParameters:
     end_date: str
     batch_days: Optional[int] = None
     driver_chunk_size: Optional[int] = None
+    max_parallel_requests: Optional[int] = None
     paycodes_csv: str = ""
     tolerance: Optional[float] = None
     should_use_cache: bool = False
@@ -48,6 +49,7 @@ class PreRunResult:
     end_date: str
     batch_days: int
     driver_chunk_size: int
+    max_parallel_requests: int
     region_count: int
     driver_count: int
     pre_tag: str
@@ -78,6 +80,7 @@ class PostRunResult:
     payroll_rows: int
     differences_rows: int
     enriched_rows: int
+    max_parallel_requests: int
 
     def files(self, pre_result: PreRunResult) -> list[Path]:
         return pre_result.files() + [
