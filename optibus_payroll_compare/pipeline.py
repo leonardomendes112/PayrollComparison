@@ -16,9 +16,12 @@ from .processing import (
     save_payroll_csv,
     to_payroll_rows_from_payroll_api,
 )
-from .utils import auto_tune_chunking, ensure_directory, parse_iso_date
+from .utils import ensure_directory, parse_iso_date
 
 LogFn = Callable[[str], None]
+DEFAULT_BATCH_DAYS = 31
+DEFAULT_DRIVER_CHUNK_SIZE = 7
+DEFAULT_MAX_PARALLEL_REQUESTS = 20
 
 
 def validate_parameters(params: RunParameters) -> tuple:
@@ -46,14 +49,24 @@ def validate_parameters(params: RunParameters) -> tuple:
     return start, end
 
 
-def _resolve_runtime_settings(driver_count: int, total_days: int, params: RunParameters) -> tuple[int, int]:
-    """Resolve batch sizes, using auto-tuning when values are not provided."""
-    tuned_batch_days, tuned_driver_chunk = auto_tune_chunking(driver_count, total_days)
-    batch_days = params.batch_days if params.batch_days and params.batch_days > 0 else tuned_batch_days
-    driver_chunk_size = (
-        params.driver_chunk_size if params.driver_chunk_size and params.driver_chunk_size > 0 else tuned_driver_chunk
+def _resolve_runtime_settings(driver_count: int, total_days: int, params: RunParameters) -> tuple[int, int, int]:
+    """Resolve batch sizes and concurrency with capped defaults."""
+    requested_batch_days = params.batch_days if params.batch_days and params.batch_days > 0 else DEFAULT_BATCH_DAYS
+    requested_driver_chunk_size = (
+        params.driver_chunk_size if params.driver_chunk_size and params.driver_chunk_size > 0 else DEFAULT_DRIVER_CHUNK_SIZE
     )
-    return int(batch_days), int(driver_chunk_size)
+    requested_max_parallel_requests = (
+        params.max_parallel_requests
+        if params.max_parallel_requests and params.max_parallel_requests > 0
+        else DEFAULT_MAX_PARALLEL_REQUESTS
+    )
+
+    batch_days = min(int(requested_batch_days), max(1, total_days))
+    driver_chunk_size = min(int(requested_driver_chunk_size), max(1, driver_count))
+    estimated_batch_count = max(1, ((total_days - 1) // batch_days) + 1)
+    estimated_chunk_count = max(1, ((driver_count - 1) // driver_chunk_size) + 1)
+    max_parallel_requests = min(int(requested_max_parallel_requests), estimated_batch_count * estimated_chunk_count)
+    return batch_days, driver_chunk_size, max_parallel_requests
 
 
 def run_pre_fetch(params: RunParameters, output_dir: Path, log: LogFn = print) -> PreRunResult:
@@ -82,11 +95,14 @@ def run_pre_fetch(params: RunParameters, output_dir: Path, log: LogFn = print) -
         raise ValueError("No drivers were returned by /v2/drivers for the selected start date.")
 
     total_days = (end - start).days + 1
-    batch_days, driver_chunk_size = _resolve_runtime_settings(len(driver_ids), total_days, params)
+    batch_days, driver_chunk_size, max_parallel_requests = _resolve_runtime_settings(len(driver_ids), total_days, params)
 
     log(f"Running across all regions/depots in this account: {region_count}")
     log(f"Drivers considered: {len(driver_ids):,}")
-    log(f"Using batch_days={batch_days} and driver_chunk_size={driver_chunk_size}")
+    log(
+        f"Using batch_days={batch_days}, driver_chunk_size={driver_chunk_size}, "
+        f"max_parallel_requests={max_parallel_requests}"
+    )
 
     log("PRE: Fetching payroll...")
     payroll_pre_records = fetch_payroll_chunked(
@@ -97,6 +113,7 @@ def run_pre_fetch(params: RunParameters, output_dir: Path, log: LogFn = print) -
         batch_days=batch_days,
         should_use_cache=params.should_use_cache,
         driver_chunk_size=driver_chunk_size,
+        max_workers=max_parallel_requests,
         paycodes=params.paycodes or None,
         log=log,
     )
@@ -130,6 +147,7 @@ def run_pre_fetch(params: RunParameters, output_dir: Path, log: LogFn = print) -
         end_date=params.end_date,
         batch_days=batch_days,
         driver_chunk_size=driver_chunk_size,
+        max_parallel_requests=max_parallel_requests,
         region_count=region_count,
         driver_count=len(driver_ids),
         pre_tag=pre_tag,
@@ -161,6 +179,8 @@ def run_post_compare(
     drivers_payload = fetch_all_drivers(client, on_date=params.start_date)
     _, by_external_id = build_driver_maps(drivers_payload)
     driver_ids = list(by_external_id.keys())
+    total_days = (end - start).days + 1
+    _, _, max_parallel_requests = _resolve_runtime_settings(len(driver_ids), total_days, params)
 
     payroll_post_records = fetch_payroll_chunked(
         client=client,
@@ -170,6 +190,7 @@ def run_post_compare(
         batch_days=pre_result.batch_days,
         should_use_cache=False,
         driver_chunk_size=pre_result.driver_chunk_size,
+        max_workers=max_parallel_requests,
         paycodes=params.paycodes or None,
         log=log,
     )
@@ -225,4 +246,5 @@ def run_post_compare(
         payroll_rows=post_payroll_rows,
         differences_rows=differences_rows,
         enriched_rows=enriched_rows,
+        max_parallel_requests=max_parallel_requests,
     )
