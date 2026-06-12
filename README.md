@@ -16,6 +16,7 @@ The workflow stays aligned with the original script:
    - POST payroll CSV
    - payroll differences CSV
    - enriched payroll differences CSV
+   - optional work entities CSV for driver-days with payroll differences
    - PRE absences CSV
    - PRE actual allocation CSV
    - PRE planned allocation CSV
@@ -88,6 +89,7 @@ Then:
 5. Make your Work Entity changes in Optibus
 6. Return to the app and click **Run POST fetch + compare**
 7. Download the CSVs or the ZIP bundle
+8. Optionally extract work entities for the driver-days with payroll differences to help troubleshoot unexpected changes
 
 ## Example usage
 
@@ -126,6 +128,7 @@ This app writes outputs to a temporary directory for the current session. Keep t
 - Driver and date chunking to reduce 413 errors
 - Pre/post payroll comparison logic
 - Enriched differences with absences, driver day labels, and allocation
+- Optional troubleshooting export of work entities for the driver-days with payroll differences
 - CSV shapes and naming style
 
 ### Changed for maintainability and Streamlit readiness
