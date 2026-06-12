@@ -237,6 +237,99 @@ def save_driver_day_labels_csv(labels: list[dict], by_uuid: dict[str, DriverInfo
     return len(dataframe)
 
 
+def load_difference_driver_days(path: Path) -> list[tuple[str, str]]:
+    """Return unique (external_driver_id, date) pairs from the differences CSV."""
+    dataframe = pd.read_csv(path, encoding="utf-8-sig", keep_default_na=False).fillna("")
+    required_columns = {COL_DRIVER, COL_DATE}
+    if not required_columns.issubset(dataframe.columns):
+        raise ValueError(f"differences CSV missing required columns: {', '.join(sorted(required_columns))}")
+
+    pairs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for _, row in dataframe.iterrows():
+        driver_id = normalize_str(row.get(COL_DRIVER))
+        date_text = normalize_str(row.get(COL_DATE))
+        if not driver_id or not date_text:
+            continue
+        key = (driver_id, date_text)
+        if key not in seen:
+            seen.add(key)
+            pairs.append(key)
+    return pairs
+
+
+def save_work_entities_csv(
+    records: list[dict],
+    by_uuid: dict[str, DriverInfo],
+    target_driver_days: set[tuple[str, str]],
+    out_path: Path,
+) -> int:
+    """Save work entities for the requested driver-days as a troubleshooting CSV."""
+
+    def normalize_driver_id(raw: Any) -> str:
+        value = safe_str(raw).strip()
+        if not value:
+            return ""
+        if value.isdigit():
+            return value
+        info = by_uuid.get(value)
+        return info.external_id if info else value
+
+    rows: list[dict[str, str]] = []
+    for record in records:
+        working_driver = record.get("workingDriver") or {}
+        driver_id = normalize_driver_id(
+            working_driver.get("driverExternalId") or working_driver.get("driverUuid") or working_driver.get("driverId")
+        )
+        occurrence_dates = record.get("occurrenceDates") or {}
+        start_date = safe_str(occurrence_dates.get("startDate") or occurrence_dates.get("date")).strip()
+        end_date = safe_str(occurrence_dates.get("endDate") or start_date).strip()
+        if not driver_id or not start_date:
+            continue
+        if (driver_id, start_date) not in target_driver_days:
+            continue
+
+        result = record.get("result") or {}
+        amount_text, unit_text = format_amount_and_unit(value=result.get("value"), unit=safe_str(result.get("type") or result.get("unit")))
+        rows.append(
+            {
+                "Driver ID": driver_id,
+                "Date": start_date,
+                "End Date": end_date,
+                "Entity ID": safe_str(record.get("entityId")),
+                "Result Value": amount_text,
+                "Result Unit": unit_text,
+                "Result Raw Value": safe_str(result.get("value")),
+                "Result Type": safe_str(result.get("type")),
+                "Time Type": safe_str((record.get("timeType") or {}).get("type")),
+                "Depot ID": safe_str(record.get("depotId")),
+                "Driver UUID": safe_str(working_driver.get("driverUuid")),
+            }
+        )
+
+    dataframe = pd.DataFrame(
+        rows,
+        columns=[
+            "Driver ID",
+            "Date",
+            "End Date",
+            "Entity ID",
+            "Result Value",
+            "Result Unit",
+            "Result Raw Value",
+            "Result Type",
+            "Time Type",
+            "Depot ID",
+            "Driver UUID",
+        ],
+    ).fillna("")
+    if not dataframe.empty:
+        dataframe["Driver ID"] = to_numeric_if_possible(dataframe["Driver ID"])
+        dataframe = dataframe.sort_values(["Driver ID", "Date", "Entity ID", "Time Type"], kind="stable")
+    dataframe.to_csv(out_path, index=False, encoding="utf-8-sig")
+    return len(dataframe)
+
+
 def _save_allocation_matrix(
     allocation_map: dict[tuple[str, str], list[str]],
     driver_ids: list[str],
