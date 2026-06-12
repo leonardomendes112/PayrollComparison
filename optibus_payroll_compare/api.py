@@ -128,6 +128,92 @@ def fetch_driver_day_labels(client: OptibusClient, start: date, end: date) -> li
     return payload if isinstance(payload, list) else []
 
 
+def fetch_work_entities_chunked(
+    client: OptibusClient,
+    start: date,
+    end: date,
+    driver_uuids: list[str],
+    batch_days: int,
+    should_use_cache: bool,
+    max_workers: int = 1,
+    export_all_entities: bool = True,
+    log=print,
+) -> list[dict]:
+    """Fetch work entities in date and driver chunks, optionally in parallel."""
+    batches = date_batches(start, end, batch_days)
+    driver_chunks = _chunk_list(driver_uuids, 25) if driver_uuids else [[]]
+    work_items = [
+        (sequence, batch_start, batch_end, chunk_index, driver_chunk)
+        for sequence, (batch_start, batch_end, chunk_index, driver_chunk) in enumerate(
+            (
+                (batch_start, batch_end, chunk_index, driver_chunk)
+                for batch_start, batch_end in batches
+                for chunk_index, driver_chunk in enumerate(driver_chunks, start=1)
+            )
+        )
+    ]
+
+    if max_workers <= 1 or len(work_items) <= 1:
+        all_rows: list[dict] = []
+        for _, batch_start, batch_end, index, driver_chunk in work_items:
+            log(f"Work entities batch {iso_date(batch_start)} -> {iso_date(batch_end)}")
+            if driver_uuids:
+                log(f"  Drivers chunk {index}/{len(driver_chunks)} (drivers={len(driver_chunk)})")
+            rows = _fetch_work_entities_range_resilient(
+                client=client,
+                start=batch_start,
+                end=batch_end,
+                driver_uuids=driver_chunk,
+                should_use_cache=should_use_cache,
+                export_all_entities=export_all_entities,
+                log=log,
+            )
+            all_rows.extend(rows)
+        return all_rows
+
+    worker_count = min(max_workers, len(work_items))
+    log(f"Using up to {worker_count} concurrent work-entities calls.")
+
+    def run_item(
+        sequence: int,
+        batch_start: date,
+        batch_end: date,
+        chunk_index: int,
+        driver_chunk: list[str],
+    ) -> tuple[int, list[dict], str]:
+        worker_client = client.clone()
+        rows = _fetch_work_entities_range_resilient(
+            client=worker_client,
+            start=batch_start,
+            end=batch_end,
+            driver_uuids=driver_chunk,
+            should_use_cache=should_use_cache,
+            export_all_entities=export_all_entities,
+            log=_noop_log,
+        )
+        summary = (
+            f"Work entities batch {iso_date(batch_start)} -> {iso_date(batch_end)} | "
+            f"chunk {chunk_index}/{len(driver_chunks)} (drivers={len(driver_chunk)}) | rows={len(rows)}"
+        )
+        return sequence, rows, summary
+
+    completed: dict[int, list[dict]] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+        future_map = {
+            executor.submit(run_item, sequence, batch_start, batch_end, chunk_index, driver_chunk): sequence
+            for sequence, batch_start, batch_end, chunk_index, driver_chunk in work_items
+        }
+        for future in concurrent.futures.as_completed(future_map):
+            sequence, rows, summary = future.result()
+            completed[sequence] = rows
+            log(summary)
+
+    all_rows: list[dict] = []
+    for sequence in sorted(completed):
+        all_rows.extend(completed[sequence])
+    return all_rows
+
+
 def build_driver_maps(drivers_payload: list[dict]) -> tuple[dict[str, DriverInfo], dict[str, DriverInfo]]:
     """Return lookup dictionaries by UUID and by external driver ID."""
     by_uuid: dict[str, DriverInfo] = {}
@@ -372,6 +458,66 @@ def _fetch_payroll_range_resilient(
         return payload
 
     raise OptibusError(f"Unexpected payroll response type: {type(payload)}")
+
+
+def _fetch_work_entities_range_resilient(
+    client: OptibusClient,
+    start: date,
+    end: date,
+    driver_uuids: list[str],
+    should_use_cache: bool,
+    export_all_entities: bool = True,
+    log=print,
+) -> list[dict]:
+    """Fetch one work-entities slice and recursively split on oversized requests."""
+    params: dict[str, Any] = {
+        "startDate": iso_date(start),
+        "endDate": iso_date(end),
+        "shouldUseCache": "true" if should_use_cache else "false",
+        "exportAllEntities": "true" if export_all_entities else "false",
+    }
+    if driver_uuids:
+        params["driverIds"] = ",".join(str(driver_uuid) for driver_uuid in driver_uuids)
+
+    payload = client.get_json("/v2/work-entities", params=params, allow_413=True)
+
+    if isinstance(payload, dict) and payload.get("__HTTP_413__"):
+        if driver_uuids and len(driver_uuids) > 1:
+            mid = len(driver_uuids) // 2
+            left = driver_uuids[:mid]
+            right = driver_uuids[mid:]
+            log(f"  413 too large. Splitting work-entities drivers: {len(driver_uuids)} -> {len(left)} + {len(right)}")
+            return _fetch_work_entities_range_resilient(
+                client, start, end, left, should_use_cache, export_all_entities, log
+            ) + _fetch_work_entities_range_resilient(
+                client, start, end, right, should_use_cache, export_all_entities, log
+            )
+
+        if start >= end:
+            raise OptibusError(
+                f"Work-entities request too large even for minimal range ({iso_date(start)}): "
+                f"{payload.get('__text__', '')[:800]}"
+            )
+
+        total_days = (end - start).days + 1
+        left_days = max(1, total_days // 2)
+        left_end = start + timedelta(days=left_days - 1)
+        right_start = left_end + timedelta(days=1)
+        log(
+            "  413 too large. Splitting work-entities dates: "
+            f"{iso_date(start)}..{iso_date(end)} -> "
+            f"{iso_date(start)}..{iso_date(left_end)} + {iso_date(right_start)}..{iso_date(end)}"
+        )
+        return _fetch_work_entities_range_resilient(
+            client, start, left_end, driver_uuids, should_use_cache, export_all_entities, log
+        ) + _fetch_work_entities_range_resilient(
+            client, right_start, end, driver_uuids, should_use_cache, export_all_entities, log
+        )
+
+    if isinstance(payload, list):
+        return payload
+
+    raise OptibusError(f"Unexpected work-entities response type: {type(payload)}")
 
 
 def fetch_absences(client: OptibusClient, start: date, end: date) -> list[dict]:
