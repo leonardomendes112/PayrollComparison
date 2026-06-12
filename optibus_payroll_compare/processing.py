@@ -283,8 +283,8 @@ def save_work_entities_csv(
             working_driver.get("driverExternalId") or working_driver.get("driverUuid") or working_driver.get("driverId")
         )
         occurrence_dates = record.get("occurrenceDates") or {}
-        start_date = safe_str(occurrenceDates.get("startDate") or occurrenceDates.get("date")).strip()
-        end_date = safe_str(occurrenceDates.get("endDate") or start_date).strip()
+        start_date = safe_str(occurrence_dates.get("startDate") or occurrence_dates.get("date")).strip()
+        end_date = safe_str(occurrence_dates.get("endDate") or start_date).strip()
         if not driver_id or not start_date:
             continue
         if (driver_id, start_date) not in target_driver_days:
