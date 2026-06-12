@@ -9,7 +9,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from optibus_payroll_compare.models import RunParameters
-from optibus_payroll_compare.pipeline import run_post_compare, run_pre_fetch
+from optibus_payroll_compare.pipeline import export_difference_work_entities, run_post_compare, run_pre_fetch
 from optibus_payroll_compare.utils import mask_api_key
 
 load_dotenv()
@@ -25,6 +25,8 @@ if "pre_result" not in st.session_state:
     st.session_state.pre_result = None
 if "post_result" not in st.session_state:
     st.session_state.post_result = None
+if "work_entities_export_result" not in st.session_state:
+    st.session_state.work_entities_export_result = None
 if "output_dir" not in st.session_state:
     st.session_state.output_dir = tempfile.mkdtemp(prefix="optibus_payroll_compare_")
 
@@ -131,6 +133,7 @@ with st.sidebar:
     if st.button("Clear session state", use_container_width=True):
         st.session_state.pre_result = None
         st.session_state.post_result = None
+        st.session_state.work_entities_export_result = None
         st.rerun()
 
 left, right = st.columns([1, 1])
@@ -149,6 +152,7 @@ with left:
             pre_result = run_pre_fetch(params=params, output_dir=output_dir, log=logger)
             st.session_state.pre_result = pre_result
             st.session_state.post_result = None
+            st.session_state.work_entities_export_result = None
             st.success("PRE fetch complete.")
         except Exception as exc:
             st.exception(exc)
@@ -170,6 +174,7 @@ with right:
             try:
                 post_result = run_post_compare(params=params, pre_result=st.session_state.pre_result, log=logger)
                 st.session_state.post_result = post_result
+                st.session_state.work_entities_export_result = None
                 st.success("POST fetch and comparison complete.")
             except Exception as exc:
                 st.exception(exc)
@@ -230,6 +235,39 @@ if st.session_state.post_result is not None:
             mime="application/zip",
             type="primary",
         )
+
+    st.subheader("Troubleshooting export")
+    st.write(
+        "If needed, extract the work entities for the driver-days where payroll changed between PRE and POST."
+    )
+    if st.button("Extract work entities for changed driver-days", use_container_width=True):
+        params = build_params()
+        log_box = st.empty()
+        logger = make_logger(log_box)
+        try:
+            export_result = export_difference_work_entities(
+                params=params,
+                pre_result=st.session_state.pre_result,
+                post_result=post_result,
+                log=logger,
+            )
+            st.session_state.work_entities_export_result = export_result
+            st.success("Work entities export complete.")
+        except Exception as exc:
+            st.exception(exc)
+
+    if st.session_state.work_entities_export_result is not None:
+        export_result = st.session_state.work_entities_export_result
+        col1, col2 = st.columns(2)
+        col1.metric("Driver-days exported", export_result.driver_day_count)
+        col2.metric("Work entity rows", export_result.work_entities_rows)
+        with open(export_result.work_entities_path, "rb") as handle:
+            st.download_button(
+                label=f"Download {export_result.work_entities_path.name}",
+                data=handle.read(),
+                file_name=export_result.work_entities_path.name,
+                mime="text/csv",
+            )
 
     st.subheader("Enriched differences preview")
     preview_df = pd.read_csv(
