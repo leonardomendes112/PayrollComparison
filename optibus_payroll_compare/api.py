@@ -27,7 +27,7 @@ def _is_retryable_payroll_error(exc: Exception) -> bool:
         "engine-error" in lowered
         or "type mismatch" in lowered
         or "could not find a type converters" in lowered
-        or '"name":"engine-error"' in lowered
+        or '\"name\":\"engine-error\"' in lowered
     )
 
 
@@ -117,6 +117,15 @@ def fetch_all_drivers(client: OptibusClient, on_date: str) -> list[dict]:
             break
         page += 1
     return all_rows
+
+
+def fetch_driver_day_labels(client: OptibusClient, start: date, end: date) -> list[dict]:
+    """Fetch driver day labels for the selected date range."""
+    payload = client.get_json(
+        "/v1/calendar-driver-day-labels",
+        params={"fromDate": iso_date(start), "toDate": iso_date(end)},
+    )
+    return payload if isinstance(payload, list) else []
 
 
 def build_driver_maps(drivers_payload: list[dict]) -> tuple[dict[str, DriverInfo], dict[str, DriverInfo]]:
