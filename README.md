@@ -125,7 +125,7 @@ This app writes outputs to a temporary directory for the current session. Keep t
 - The same core Optibus API workflow
 - Driver and date chunking to reduce 413 errors
 - Pre/post payroll comparison logic
-- Enriched differences with absences and allocation
+- Enriched differences with absences, driver day labels, and allocation
 - CSV shapes and naming style
 
 ### Changed for maintainability and Streamlit readiness
