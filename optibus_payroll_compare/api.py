@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import concurrent.futures
 from collections import defaultdict
-from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any, Optional
 
@@ -27,7 +27,7 @@ def _is_retryable_payroll_error(exc: Exception) -> bool:
         "engine-error" in lowered
         or "type mismatch" in lowered
         or "could not find a type converters" in lowered
-        or '\"name\":\"engine-error\"' in lowered
+        or '"name":"engine-error"' in lowered
     )
 
 
@@ -42,6 +42,8 @@ class OptibusClient:
 
     def __init__(self, base_url: str, api_key: str, api_client: str, timeout_s: int = 120) -> None:
         self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.api_client = api_client
         self.timeout_s = timeout_s
         self.session = requests.Session()
         self.session.headers.update(
@@ -49,6 +51,15 @@ class OptibusClient:
                 "Authorization": api_key,
                 "X-Optibus-Api-Client": api_client,
             }
+        )
+
+    def clone(self) -> "OptibusClient":
+        """Create a fresh client instance for parallel request workers."""
+        return OptibusClient(
+            base_url=self.base_url,
+            api_key=self.api_key,
+            api_client=self.api_client,
+            timeout_s=self.timeout_s,
         )
 
     def _url(self, path: str) -> str:
@@ -145,6 +156,11 @@ def _chunk_list(items: list[str], chunk_size: int) -> list[list[str]]:
     return [items[index : index + chunk_size] for index in range(0, len(items), chunk_size)]
 
 
+def _noop_log(_: str) -> None:
+    """Avoid cross-thread writes to the Streamlit log container."""
+    return None
+
+
 def fetch_payroll_chunked(
     client: OptibusClient,
     start: date,
@@ -154,18 +170,29 @@ def fetch_payroll_chunked(
     should_use_cache: bool,
     depot_id: Optional[str] = None,
     driver_chunk_size: int = 50,
+    max_workers: int = 1,
     paycodes: Optional[list[str]] = None,
     sleep_seconds: float = 0.0,
     log=print,
 ) -> list[dict]:
-    """Fetch payroll in date and driver chunks to reduce 413 errors."""
-    all_rows: list[dict] = []
+    """Fetch payroll in date and driver chunks, optionally in parallel."""
     batches = date_batches(start, end, batch_days)
     driver_chunks = _chunk_list(driver_ids, driver_chunk_size) if driver_ids else [[]]
+    work_items = [
+        (sequence, batch_start, batch_end, chunk_index, driver_chunk)
+        for sequence, (batch_start, batch_end, chunk_index, driver_chunk) in enumerate(
+            (
+                (batch_start, batch_end, chunk_index, driver_chunk)
+                for batch_start, batch_end in batches
+                for chunk_index, driver_chunk in enumerate(driver_chunks, start=1)
+            )
+        )
+    ]
 
-    for batch_start, batch_end in batches:
-        log(f"Payroll batch {iso_date(batch_start)} -> {iso_date(batch_end)}")
-        for index, driver_chunk in enumerate(driver_chunks, start=1):
+    if max_workers <= 1 or len(work_items) <= 1:
+        all_rows: list[dict] = []
+        for _, batch_start, batch_end, index, driver_chunk in work_items:
+            log(f"Payroll batch {iso_date(batch_start)} -> {iso_date(batch_end)}")
             if driver_ids:
                 log(f"  Drivers chunk {index}/{len(driver_chunks)} (drivers={len(driver_chunk)})")
             rows = _fetch_payroll_range_resilient(
@@ -183,7 +210,49 @@ def fetch_payroll_chunked(
                 import time
 
                 time.sleep(sleep_seconds)
+        return all_rows
 
+    worker_count = min(max_workers, len(work_items))
+    log(f"Using up to {worker_count} concurrent payroll calls.")
+
+    def run_item(
+        sequence: int,
+        batch_start: date,
+        batch_end: date,
+        chunk_index: int,
+        driver_chunk: list[str],
+    ) -> tuple[int, list[dict], str]:
+        worker_client = client.clone()
+        rows = _fetch_payroll_range_resilient(
+            client=worker_client,
+            start=batch_start,
+            end=batch_end,
+            driver_ids=driver_chunk,
+            should_use_cache=should_use_cache,
+            depot_id=depot_id,
+            paycodes=paycodes,
+            log=_noop_log,
+        )
+        summary = (
+            f"Payroll batch {iso_date(batch_start)} -> {iso_date(batch_end)} | "
+            f"chunk {chunk_index}/{len(driver_chunks)} (drivers={len(driver_chunk)}) | rows={len(rows)}"
+        )
+        return sequence, rows, summary
+
+    completed: dict[int, list[dict]] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+        future_map = {
+            executor.submit(run_item, sequence, batch_start, batch_end, chunk_index, driver_chunk): sequence
+            for sequence, batch_start, batch_end, chunk_index, driver_chunk in work_items
+        }
+        for future in concurrent.futures.as_completed(future_map):
+            sequence, rows, summary = future.result()
+            completed[sequence] = rows
+            log(summary)
+
+    all_rows: list[dict] = []
+    for sequence in sorted(completed):
+        all_rows.extend(completed[sequence])
     return all_rows
 
 
