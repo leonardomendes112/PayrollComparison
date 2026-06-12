@@ -39,6 +39,7 @@ def build_params() -> RunParameters:
         end_date=st.session_state.end_date.isoformat() if st.session_state.end_date else "",
         batch_days=int(st.session_state.batch_days) if st.session_state.batch_days else None,
         driver_chunk_size=int(st.session_state.driver_chunk_size) if st.session_state.driver_chunk_size else None,
+        max_parallel_requests=int(st.session_state.max_parallel_requests) if st.session_state.max_parallel_requests else None,
         paycodes_csv=st.session_state.paycodes_csv.strip(),
         tolerance=float(st.session_state.tolerance) if st.session_state.tolerance else None,
         should_use_cache=st.session_state.should_use_cache,
@@ -90,18 +91,27 @@ with st.sidebar:
     st.number_input(
         "Batch days (optional override)",
         key="batch_days",
-        min_value=0,
-        value=0,
+        min_value=1,
+        value=31,
         step=1,
-        help="Use 0 to let the app auto-tune this value.",
+        help="Default is 31. The app caps this automatically when the selected period is shorter.",
     )
     st.number_input(
         "Driver chunk size (optional override)",
         key="driver_chunk_size",
-        min_value=0,
-        value=0,
+        min_value=1,
+        value=7,
         step=1,
-        help="Use 0 to let the app auto-tune this value.",
+        help="Default is 7. The app caps this automatically when fewer drivers are in scope.",
+    )
+    st.number_input(
+        "Parallel payroll calls",
+        key="max_parallel_requests",
+        min_value=1,
+        max_value=50,
+        value=20,
+        step=1,
+        help="Default is 20. The app caps this automatically when fewer payroll chunks exist.",
     )
     st.number_input(
         "Numeric diff tolerance (optional)",
@@ -173,6 +183,11 @@ if st.session_state.pre_result is not None:
     col2.metric("Drivers", pre_result.driver_count)
     col3.metric("Payroll rows", pre_result.payroll_rows)
     col4.metric("Absence rows", pre_result.absences_rows)
+    st.caption(
+        f"Run settings used: batch_days={pre_result.batch_days}, "
+        f"driver_chunk_size={pre_result.driver_chunk_size}, "
+        f"parallel_calls={pre_result.max_parallel_requests}"
+    )
 
     for file_path in pre_result.files():
         with open(file_path, "rb") as handle:
@@ -191,6 +206,7 @@ if st.session_state.post_result is not None:
     col1.metric("POST payroll rows", post_result.payroll_rows)
     col2.metric("Difference rows", post_result.differences_rows)
     col3.metric("Enriched rows", post_result.enriched_rows)
+    st.caption(f"POST payroll fetch used parallel_calls={post_result.max_parallel_requests}")
 
     for file_path in [
         post_result.post_payroll_path,
