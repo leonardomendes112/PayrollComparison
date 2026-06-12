@@ -55,15 +55,18 @@ class PreRunResult:
     pre_tag: str
     pre_payroll_path: Path
     pre_absences_path: Path
+    pre_driver_day_labels_path: Path
     pre_allocation_actual_path: Path
     pre_allocation_planned_path: Path
     payroll_rows: int
     absences_rows: int
+    driver_day_label_rows: int
 
     def files(self) -> list[Path]:
         return [
             self.pre_payroll_path,
             self.pre_absences_path,
+            self.pre_driver_day_labels_path,
             self.pre_allocation_actual_path,
             self.pre_allocation_planned_path,
         ]
