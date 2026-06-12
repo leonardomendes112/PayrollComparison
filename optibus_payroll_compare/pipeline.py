@@ -13,16 +13,19 @@ from .api import (
     fetch_driver_day_labels,
     fetch_payroll_chunked,
     fetch_regions,
+    fetch_work_entities_chunked,
 )
-from .models import PostRunResult, PreRunResult, RunParameters
+from .models import PostRunResult, PreRunResult, RunParameters, WorkEntitiesExportResult
 from .processing import (
     compute_diffs,
     create_zip_archive,
     enrich_differences,
+    load_difference_driver_days,
     save_absences_csv,
     save_allocation_csvs,
     save_driver_day_labels_csv,
     save_payroll_csv,
+    save_work_entities_csv,
     to_payroll_rows_from_payroll_api,
 )
 from .utils import ensure_directory, parse_iso_date
@@ -269,4 +272,86 @@ def run_post_compare(
         differences_rows=differences_rows,
         enriched_rows=enriched_rows,
         max_parallel_requests=max_parallel_requests,
+    )
+
+
+def export_difference_work_entities(
+    params: RunParameters,
+    pre_result: PreRunResult,
+    post_result: PostRunResult,
+    log: LogFn = print,
+) -> WorkEntitiesExportResult:
+    """Export work entities for the driver-days that appear in the payroll differences file."""
+    start, end = validate_parameters(params)
+    client = OptibusClient(params.base_url, params.api_key, params.api_client)
+
+    diff_driver_days = load_difference_driver_days(post_result.differences_path)
+    if not diff_driver_days:
+        out_path = (
+            pre_result.output_dir
+            / f"work_entities_for_payroll_differences_{params.start_date}_to_{params.end_date}_{pre_result.run_id}.csv"
+        )
+        save_work_entities_csv(records=[], by_uuid={}, target_driver_days=set(), out_path=out_path)
+        return WorkEntitiesExportResult(
+            work_entities_path=out_path,
+            work_entities_rows=0,
+            driver_day_count=0,
+        )
+
+    drivers_payload = fetch_all_drivers(client, on_date=params.start_date)
+    by_uuid, by_external_id = build_driver_maps(drivers_payload)
+
+    grouped_dates: dict[str, list[str]] = {}
+    for driver_id, date_text in diff_driver_days:
+        grouped_dates.setdefault(date_text, []).append(driver_id)
+
+    work_entity_records: list[dict] = []
+    for date_text in sorted(grouped_dates):
+        missing_driver_ids = sorted({driver_id for driver_id in grouped_dates[date_text] if driver_id not in by_external_id})
+        if missing_driver_ids:
+            log(
+                f"Skipping {len(missing_driver_ids)} driver IDs on {date_text} because they could not be mapped back "
+                "to current driver UUIDs."
+            )
+        driver_uuids = sorted(
+            {
+                info.uuid
+                for driver_id in grouped_dates[date_text]
+                for info in [by_external_id.get(driver_id)]
+                if info and info.uuid
+            }
+        )
+        if not driver_uuids:
+            continue
+        day = parse_iso_date(date_text)
+        log(f"Fetching work entities for {date_text} across {len(driver_uuids)} drivers with differences...")
+        work_entity_records.extend(
+            fetch_work_entities_chunked(
+                client=client,
+                start=day,
+                end=day,
+                driver_uuids=driver_uuids,
+                batch_days=1,
+                should_use_cache=False,
+                max_workers=min(post_result.max_parallel_requests, max(1, len(driver_uuids))),
+                export_all_entities=True,
+                log=log,
+            )
+        )
+
+    out_path = (
+        pre_result.output_dir
+        / f"work_entities_for_payroll_differences_{params.start_date}_to_{params.end_date}_{pre_result.run_id}.csv"
+    )
+    target_driver_days = set(diff_driver_days)
+    work_entities_rows = save_work_entities_csv(
+        records=work_entity_records,
+        by_uuid=by_uuid,
+        target_driver_days=target_driver_days,
+        out_path=out_path,
+    )
+    return WorkEntitiesExportResult(
+        work_entities_path=out_path,
+        work_entities_rows=work_entities_rows,
+        driver_day_count=len(target_driver_days),
     )
