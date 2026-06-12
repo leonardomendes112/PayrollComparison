@@ -92,3 +92,12 @@ class PostRunResult:
             self.enriched_differences_path,
             self.zip_path,
         ]
+
+
+@dataclass(frozen=True)
+class WorkEntitiesExportResult:
+    """Artifacts created when exporting work entities for driver-days with payroll differences."""
+
+    work_entities_path: Path
+    work_entities_rows: int
+    driver_day_count: int
