@@ -187,7 +187,7 @@ def run_post_compare(
     params: RunParameters,
     pre_result: PreRunResult,
     log: LogFn = print,
-    propagation_wait_seconds: int = 5,
+    propagation_wait_seconds: int = 45,
 ) -> PostRunResult:
     """Run the POST stage, then compute and enrich differences."""
     start, end = validate_parameters(params)
