@@ -1,8 +1,8 @@
 """Optibus payroll compare package."""
 
 from .api import OptibusClient, OptibusError
-from .models import PostRunResult, PreRunResult, RunParameters
-from .pipeline import run_post_compare, run_pre_fetch
+from .models import PostRunResult, PreRunResult, RunParameters, WorkEntitiesExportResult
+from .pipeline import export_difference_work_entities, run_post_compare, run_pre_fetch
 
 __all__ = [
     "OptibusClient",
@@ -10,6 +10,8 @@ __all__ = [
     "PostRunResult",
     "PreRunResult",
     "RunParameters",
+    "WorkEntitiesExportResult",
     "run_pre_fetch",
     "run_post_compare",
+    "export_difference_work_entities",
 ]
