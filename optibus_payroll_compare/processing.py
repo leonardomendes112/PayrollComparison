@@ -182,6 +182,61 @@ def save_absences_csv(absences: list[dict], by_external_id: dict[str, DriverInfo
     return len(dataframe)
 
 
+def save_driver_day_labels_csv(labels: list[dict], by_uuid: dict[str, DriverInfo], out_path: Path) -> int:
+    """Save driver day labels keyed by driver and date."""
+
+    def normalize_driver_id(raw: Any) -> str:
+        driver_id = safe_str(raw).strip()
+        if not driver_id:
+            return ""
+        if driver_id.isdigit():
+            return driver_id
+        info = by_uuid.get(driver_id)
+        return info.external_id if info else driver_id
+
+    def extract_label(row: dict[str, Any]) -> str:
+        for candidate in (
+            row.get("driverDayLabel"),
+            row.get("dayLabel"),
+            row.get("label"),
+            row.get("labelName"),
+            row.get("name"),
+        ):
+            text = safe_str(candidate).strip()
+            if text:
+                return text
+        nested = row.get("driverDayLabelInfo") or row.get("labelInfo") or {}
+        if isinstance(nested, dict):
+            for key in ("name", "label", "displayName"):
+                text = safe_str(nested.get(key)).strip()
+                if text:
+                    return text
+        return ""
+
+    rows = []
+    for label in labels:
+        driver_id = normalize_driver_id(
+            label.get("driverId") or label.get("driverUuid") or label.get("workingDriverId") or ""
+        )
+        date_text = safe_str(label.get("date") or label.get("startDate") or "").strip()
+        label_text = extract_label(label)
+        if driver_id and date_text and label_text:
+            rows.append(
+                {
+                    "Driver ID": driver_id,
+                    "Date": date_text,
+                    "Driver Day Label": label_text,
+                }
+            )
+
+    dataframe = pd.DataFrame(rows, columns=["Driver ID", "Date", "Driver Day Label"]).fillna("")
+    if not dataframe.empty:
+        dataframe["Driver ID"] = to_numeric_if_possible(dataframe["Driver ID"])
+        dataframe = dataframe.sort_values(["Driver ID", "Date", "Driver Day Label"], kind="stable")
+    dataframe.to_csv(out_path, index=False, encoding="utf-8-sig")
+    return len(dataframe)
+
+
 def _save_allocation_matrix(
     allocation_map: dict[tuple[str, str], list[str]],
     driver_ids: list[str],
@@ -430,11 +485,12 @@ def compute_diffs(
 def enrich_differences(
     amount_path: Path,
     absences_path: Path,
+    driver_day_labels_path: Path,
     allocation_actual_path: Path,
     allocation_planned_path: Path,
     out_path: Path,
 ) -> int:
-    """Enrich differences with absences, actual allocation, and planned allocation."""
+    """Enrich differences with absences, driver day labels, actual allocation, and planned allocation."""
     amount = pd.read_csv(amount_path, encoding="utf-8-sig", keep_default_na=False).fillna("")
     for column in [COL_DRIVER, COL_DATE]:
         if column not in amount.columns:
@@ -488,6 +544,22 @@ def enrich_differences(
                 ordered.append(code)
                 seen.add(code)
         return ", ".join(ordered)
+
+    labels_df = pd.read_csv(driver_day_labels_path, encoding="utf-8-sig", keep_default_na=False).fillna("")
+    label_map: dict[tuple[str, pd.Timestamp], str] = {}
+    if not labels_df.empty:
+        required_label_columns = {"Driver ID", "Date", "Driver Day Label"}
+        if not required_label_columns.issubset(labels_df.columns):
+            raise ValueError("driver day labels CSV missing required columns: Driver ID, Date, Driver Day Label")
+        labels_df["Driver ID"] = labels_df["Driver ID"].apply(normalize_str)
+        labels_df["Date"] = pd.to_datetime(labels_df["Date"], errors="coerce")
+        for _, row in labels_df.iterrows():
+            driver_id = normalize_str(row.get("Driver ID"))
+            date_value = row.get("Date")
+            label_text = normalize_str(row.get("Driver Day Label"))
+            if not driver_id or pd.isna(date_value) or not label_text:
+                continue
+            label_map[(driver_id, date_value.normalize())] = label_text
 
     actual_allocation = pd.read_csv(
         allocation_actual_path, encoding="utf-8-sig", keep_default_na=False
@@ -546,6 +618,12 @@ def enrich_differences(
         else ""
         for driver_id, timestamp in zip(amount[COL_DRIVER], amount[COL_DATE])
     ]
+    amount["Driver Day Label"] = [
+        label_map.get((normalize_str(driver_id), timestamp.normalize()), "")
+        if (normalize_str(driver_id) and not pd.isna(timestamp))
+        else ""
+        for driver_id, timestamp in zip(amount[COL_DRIVER], amount[COL_DATE])
+    ]
     amount["Actual Allocation"] = [
         allocation_for(normalize_str(driver_id), timestamp, "actual")
         if (normalize_str(driver_id) and not pd.isna(timestamp))
@@ -559,7 +637,7 @@ def enrich_differences(
         for driver_id, timestamp in zip(amount[COL_DRIVER], amount[COL_DATE])
     ]
 
-    for column in ["Pre-changes", "Post-changes", "Absences", "Actual Allocation", "Planned Allocation"]:
+    for column in ["Pre-changes", "Post-changes", "Absences", "Driver Day Label", "Actual Allocation", "Planned Allocation"]:
         if column in amount.columns:
             if column in {"Pre-changes", "Post-changes"}:
                 amount[column] = amount[column].apply(
