@@ -83,7 +83,7 @@ Then:
 
 1. Enter your connection details if they are not already in environment variables
 2. Choose the start and end date
-3. Optionally provide paycodes, batch overrides, or a diff tolerance
+3. Optionally provide paycodes, diff tolerance, or runtime overrides
 4. Click **Run PRE fetch**
 5. Make your Work Entity changes in Optibus
 6. Return to the app and click **Run POST fetch + compare**
@@ -141,3 +141,11 @@ This app writes outputs to a temporary directory for the current session. Keep t
 ## Notes
 
 This refactor intentionally follows the behavior of the current uploaded script, which runs across **all regions/depots in the account** rather than prompting for a single depot.
+
+Default runtime settings are tuned for throughput:
+
+- `Batch days`: `31`
+- `Driver chunk size`: `7`
+- `Parallel payroll calls`: `20`
+
+These values are automatically capped when the selected period or available driver chunks are smaller.
